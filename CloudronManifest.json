@@ -9,7 +9,6 @@
   "healthCheckPath": "/",
   "httpPort": 80,
   "manifestVersion": 2,
-  "categories": ["tools", "games"],
   "dockerImage": "ghcr.io/orcvole/panel:latest",
   "addons": {
     "localstorage": {},
