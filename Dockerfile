@@ -1,114 +1,102 @@
-# syntax=docker.io/docker/dockerfile:1.13-labs
-# Pelican Production Dockerfile (Modified for local/Cloudron builds)
-
-##
-#  If you want to build this locally you want to run `docker build -f Dockerfile.dev`
-##
+# syntax=docker/dockerfile:1.13-labs
 
 # ================================
 # Stage 1-1: Composer Install
 # ================================
-FROM --platform=$TARGETOS/$TARGETARCH php:8.2-fpm-alpine AS composer-install
+FROM composer:latest AS composer-install
 
 WORKDIR /build
-
-COPY --from=composer:latest /usr/bin/composer /usr/local/bin/composer
-
-# Copy bare minimum to install Composer dependencies
+RUN apk add --no-cache icu-dev libzip-dev zip unzip
 COPY composer.json composer.lock ./
-
-RUN composer install --no-dev --no-interaction --no-autoloader --no-scripts
+RUN composer install \
+        --no-dev \
+        --no-interaction \
+        --no-autoloader \
+        --no-scripts \
+        --ignore-platform-reqs
 
 # ================================
-# Stage 1-2: Yarn Install
+# Stage 1-2: Yarn install
 # ================================
-FROM --platform=$TARGETOS/$TARGETARCH node:20-alpine AS yarn-install
-
+FROM node:20-alpine AS yarn-install
 WORKDIR /build
-
-# Copy bare minimum to install Yarn dependencies
 COPY package.json yarn.lock ./
-
-RUN yarn config set network-timeout 300000 \
-    && yarn install --frozen-lockfile
+RUN yarn install --frozen-lockfile --production=false
 
 # ================================
-# Stage 2-1: Composer Optimize
+# Stage 1-3: Build frontend
 # ================================
-FROM --platform=$TARGETOS/$TARGETARCH composer AS composerbuild
-
-# Copy full code to optimize autoload
-COPY --exclude=Caddyfile --exclude=docker/ . ./
-
-RUN composer dump-autoload --optimize
-
-# ================================
-# Stage 2-2: Build Frontend Assets
-# ================================
-FROM --platform=$TARGETOS/$TARGETARCH yarn-install AS yarnbuild
-
+FROM node:20-alpine AS yarnbuild
 WORKDIR /build
-
-# Copy full code
 COPY --exclude=Caddyfile --exclude=docker/ . ./
-COPY --from=composerbuild /build .
-
+COPY --from=yarn-install /build/node_modules ./node_modules
+COPY --from=composer-install /build/vendor ./vendor
+ARG APP_ENV="production"
+ENV NODE_ENV="${APP_ENV}"
 RUN yarn run build
 
 # ================================
-# Stage 5: Build Final Application Image
+# Stage 1-4: Build backend
 # ================================
-FROM --platform=$TARGETOS/$TARGETARCH php:8.2-fpm-alpine AS final  # Modified: Use public PHP base instead of localhost registry
+FROM composer:latest AS composerbuild
+WORKDIR /build
+COPY --exclude=Caddyfile --exclude=docker/ . ./
+COPY --from=composer-install /build/vendor ./vendor
+ARG APP_ENV="production"
+ENV APP_ENV="${APP_ENV}"
+RUN composer dump-autoload --optimize
+
+# ================================
+# Stage 2: Final runtime image
+# ================================
+FROM php:8.2-fpm-alpine
+
+LABEL org.opencontainers.image.authors="Pelican Panel"
+LABEL org.opencontainers.image.title="Pelican Panel"
+LABEL org.opencontainers.image.source="https://github.com/pelican-dev/panel"
 
 WORKDIR /var/www/html
 
-# Install additional required libraries (custom RUN from original final stage)
-RUN apk update && apk add --no-cache \
-    caddy ca-certificates supervisor supercronic \
-    libpng-dev libjpeg-turbo-dev freetype-dev libzip-dev icu-dev libxml2-dev curl-dev oniguruma-dev \
+RUN apk add --no-cache \
+        caddy ca-certificates tzdata curl unzip git \
+        freetype-dev libjpeg-turbo-dev libpng-dev \
+        icu-dev libzip-dev zip postgresql-dev \
+        supervisor \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install pdo_mysql gd zip intl exif pcntl soap bcmath
+    && docker-php-ext-install -j$(nproc) \
+        pdo_mysql pdo pdo_pgsql \
+        gd bcmath intl zip opcache pcntl \
+    && rm -rf /var/cache/apk/* /tmp/* /var/tmp/*
 
-# Copy artifacts from previous stages (preserves multi-stage benefits)
-COPY --chown=root:www-data --chmod=640 --from=composer-install /build .
-COPY --chown=root:www-data --chmod=640 --from=composerbuild /build .
-COPY --chown=root:www-data --chmod=640 --from=yarnbuild /build/public ./public
+COPY --from=composerbuild --chown=82:82 /build ./
+COPY --from=yarnbuild --chown=82:82 /build/public/build ./public/build
 
-# Set permissions (custom RUN from original final stage)
-# First ensure all files are owned by root and restrict www-data to read access
+# Cloudron-specific storage setup (persistent data in /app/data)
 RUN chown root:www-data ./ \
     && chmod 750 ./ \
-    # Files should not have execute set, but directories need it
     && find ./ -type d -exec chmod 750 {} \; \
-    # Create necessary directories
-    && mkdir -p /pelican-data/storage /var/www/html/storage/app/public /var/run/supervisord /etc/supercronic \
-    # Symlinks for env, database, and avatars
-    && ln -s /pelican-data/.env ./.env \
-    && ln -s /pelican-data/database/database.sqlite ./database/database.sqlite \
+    && mkdir -p /app/data/storage /var/www/html/storage/app/public /var/run/supervisord /etc/supercronic \
+    && ln -s /app/data/.env ./.env \
+    && ln -s /app/data/database/database.sqlite ./database/database.sqlite \
     && ln -sf /var/www/html/storage/app/public /var/www/html/public/storage \
-    && ln -s  /pelican-data/storage/avatars /var/www/html/storage/app/public/avatars \
-    && ln -s  /pelican-data/storage/fonts /var/www/html/storage/app/public/fonts \
-    # Allow www-data write permissions where necessary
-    && chown -R www-data:www-data /pelican-data ./storage ./bootstrap/cache /var/run/supervisord /var/www/html/public/storage \
-    && chmod -R u+rwX,g+rwX,o-rwx /pelican-data ./storage ./bootstrap/cache /var/run/supervisord
+    && ln -s /app/data/storage/avatars /var/www/html/storage/app/public/avatars \
+    && ln -s /app/data/storage/fonts /var/www/html/storage/app/public/fonts \
+    && chown -R www-data:www-data /app/data ./storage ./bootstrap/cache /var/run/supervisord /var/www/html/public/storage \
+    && chmod -R u+rwX,g+rwX,o-rwx /app/data ./storage ./bootstrap/cache /var/run/supervisord
 
-# Configure Supervisor (original COPY)
-COPY docker/supervisord.conf /etc/supervisord.conf
 COPY docker/Caddyfile /etc/caddy/Caddyfile
-# Add Laravel scheduler to crontab
-COPY docker/crontab /etc/supercronic/crontab
+COPY docker/supervisord.conf /etc/supervisord.conf
+COPY docker/entrypoint.sh /entrypoint.sh
 
-COPY docker/entrypoint.sh ./docker/entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-HEALTHCHECK --interval=5m --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost/up || exit 1
+# Add health check for Cloudron (checks root path with timeouts for startup)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost/ || exit 1
+
+VOLUME /app/data
 
 EXPOSE 80 443
-
-VOLUME /pelican-data
-
-USER www-data
-
-ENTRYPOINT [ "/bin/ash", "docker/entrypoint.sh" ]
-CMD [ "supervisord", "-n", "-c", "/etc/supervisord.conf" ]
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["supervisord", "-c", "/etc/supervisord.conf"]
 
