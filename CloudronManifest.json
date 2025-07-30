@@ -9,7 +9,7 @@
   "healthCheckPath": "/",
   "httpPort": 80,
   "manifestVersion": 2,
-  "dockerImage": "ghcr.io/orcvole/panel:latest",
+  "dockerImage": "highlandgnu/pelican-panel:latest",
   "addons": {
     "localstorage": {},
     "mysql": {},
