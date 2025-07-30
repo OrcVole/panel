@@ -51,9 +51,20 @@ RUN composer dump-autoload --optimize
 # ================================
 FROM php:8.2-fpm-alpine
 
-LABEL org.opencontainers.image.authors="Pelican Panel"
-LABEL org.opencontainers.image.title="Pelican Panel"
-LABEL org.opencontainers.image.source="https://github.com/pelican-dev/panel"
+# Default environment variables for Pelican (can be overridden post-install)
+ENV APP_ENV=production
+ENV APP_DEBUG=false
+ENV APP_URL=https://pelican.haggis.top
+ENV APP_KEY=base64:z6yFDeTUxbHvnHipBHO1FMJIyDntdtufLBsG84MUEAQ=
+ENV DB_CONNECTION=mysql
+ENV DB_HOST=127.0.0.1
+ENV DB_PORT=3306
+ENV DB_DATABASE=pelican
+ENV DB_USERNAME=root
+ENV DB_PASSWORD=secret
+ENV MAIL_DRIVER=sendmail
+ENV MAIL_FROM_ADDRESS=admin@pelican.haggis.top
+ENV MAIL_FROM_NAME="Pelican Panel"
 
 WORKDIR /var/www/html
 
